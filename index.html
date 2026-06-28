@@ -104,10 +104,11 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font-family:
       <button class="tool on" data-t="line">Line</button>
       <button class="tool" data-t="step">Step</button>
     </div>
-    <span class="barlab" style="margin-left:6px">View</span>
-    <div class="group" id="view">
-      <button class="tool on" data-v="ladder" title="Show the full rank ladder (where you sit vs CL/Europa)">Ladder</button>
-      <button class="tool" data-v="drift" title="Zoom into the day-to-day repricing">Drift</button>
+    <span class="barlab" style="margin-left:6px">Ladder detail</span>
+    <div class="group" id="detail">
+      <button class="tool" data-s="1" title="Whole places (…3, 4, 5…)">R1</button>
+      <button class="tool on" data-s="0.1" title="Tenths of a place (…4.0, 4.1, 4.2…)">R1.1</button>
+      <button class="tool" data-s="0.01" title="Hundredths (…4.10, 4.11, 4.12…)">R1.11</button>
     </div>
     <div class="group">
       <button class="tool" id="t-rungs" title="Toggle rank rungs">Rungs ✓</button>
@@ -132,7 +133,7 @@ const F = (n,d=2)=>n==null?"—":Number(n).toLocaleString("en-US",{minimumFracti
 const ord = n => { const r=Math.round(n); const s=["th","st","nd","rd"], v=r%100; return r+(s[(v-20)%10]||s[v]||s[0]); };
 const tsec = iso => Math.floor(new Date(iso).getTime()/1000);
 
-let D, A, K, CB, AR, PP, KICK_T, NOW_T, series, chart, ladderMode=true, showRungs=true, chartType="line", priceLines=[], CLEAN, DMIN, DMAX;
+let D, A, K, CB, AR, PP, KICK_T, NOW_T, series, chart, rungs, showRungs=true, chartType="line", rankStep=0.1, CLEAN, DMIN, DMAX;
 
 // ---- ladder math (single source of truth) ----
 const usdFromRank = r => Math.exp(K*(CB+(AR-r)*PP));
@@ -154,7 +155,7 @@ async function boot(){
   const chg=px-first.usd, chgp=100*chg/first.usd;
   document.getElementById("pxchg").innerHTML = `<span class="${chg>=0?'up':'down'}">${chg>=0?'+':''}${F(chg)} (${chg>=0?'+':''}${F(chgp,1)}%)</span> · since ${first.t.slice(0,10)}`;
   document.getElementById("fin").textContent = ord(fin);
-  document.getElementById("finnote").textContent = `price implies ${F(fin,1)} · anchor ${F(AR,1)}`;
+  document.getElementById("finnote").textContent = `price implies ${F(fin,2)} · anchor ${F(AR,2)}`;
   const mc=D.consensus_now;
   document.getElementById("mkt").textContent = `${F(mc.title_prob*100,1)}% title`;
   document.getElementById("mktnote").textContent = `${mc.books} sharp books · rank ${F(mc.board_rank,1)}`;
@@ -187,9 +188,7 @@ function buildChart(){
     handleScale:{axisPressedMouseMove:{time:true,price:false}},
   });
 
-  const prov = () => ladderMode
-    ? { priceRange:{ minValue: usdFromRank(7.6), maxValue: usdFromRank(0.7) } }
-    : { priceRange:{ minValue: DMIN, maxValue: DMAX } };
+  const prov = () => ({ priceRange:{ minValue: DMIN, maxValue: DMAX } });
 
   series = chart.addSeries(AreaSeries, {
     lineColor:"#cfe9a3", lineWidth:2,
@@ -217,33 +216,60 @@ function buildChart(){
   for(let t=lastDataT+DT;t<KICK_T;t+=DT) clean.push({time:t});
   clean.push({time:KICK_T});
   CLEAN=clean;
+  // always tight to the live price (rank-padded), so the day-to-day drift is always visible
   const vals=clean.filter(d=>d.value!=null).map(d=>d.value);
-  DMIN=Math.min(...vals); DMAX=Math.max(...vals);
-  const pad=Math.max(0.05,(DMAX-DMIN)*0.65); DMIN-=pad; DMAX+=pad;
+  const ranks=vals.map(rankFromUsd);
+  const rLo=Math.min(...ranks), rHi=Math.max(...ranks);   // rLo=best place, rHi=worst
+  const padR=Math.max(0.30,(rHi-rLo)*0.9);
+  DMAX=usdFromRank(rLo-padR);  // better rank -> higher price -> top
+  DMIN=usdFromRank(rHi+padR);
   series.setData(clean);
   setType(chartType);
 
   series.attachPrimitive(makeCorridor());
-  drawRungs();
+  rungs=makeRungs(); series.attachPrimitive(rungs); rungs.setStep(rankStep);
   chart.timeScale().fitContent();
 
   chart.subscribeCrosshairMove(onHover);
 }
 
-// ---- rank rungs as horizontal price lines ----
-function drawRungs(){
-  priceLines.forEach(pl=>series.removePriceLine(pl)); priceLines=[];
-  if(!showRungs) return;
-  for(let r=1;r<=7;r++){
-    const cl = (r===4);
-    priceLines.push(series.createPriceLine({
-      price: usdFromRank(r),
-      color: cl ? "rgba(245,196,81,.85)" : "rgba(120,131,146,.34)",
-      lineWidth: cl?1:1, lineStyle: cl?LineStyle.Solid:LineStyle.Dotted,
-      axisLabelVisible:true,
-      title: cl ? `P4 · CL line` : `P${r}`,
-    }));
-  }
+// ---- rank ladder rungs (canvas primitive). granularity = rankStep (1 / 0.1 / 0.01) ----
+function makeRungs(){
+  let api=null, step=0.1;
+  const draw = target => { if(!api||!showRungs) return; target.useBitmapCoordinateSpace(scope=>{
+    const ctx=scope.context, hpr=scope.horizontalPixelRatio, vpr=scope.verticalPixelRatio;
+    const s=api.series, H=scope.bitmapSize.height, W=scope.bitmapSize.width, mh=scope.mediaSize.height;
+    const pTop=s.coordinateToPrice(0), pBot=s.coordinateToPrice(mh);
+    if(pTop==null||pBot==null) return;
+    const rTop=rankFromUsd(pTop), rBot=rankFromUsd(pBot);   // rTop=best (top), rBot=worst (bottom)
+    const dec = step>=1?0:(step>=0.1?1:2);
+    const r0=Math.floor(rTop/step)*step, r1=Math.ceil(rBot/step)*step;
+    ctx.save();
+    ctx.font=`${10*hpr}px ui-monospace,Menlo,monospace`; ctx.textBaseline="middle"; ctx.textAlign="left";
+    let lastLabelY=-1e9, n=0;
+    for(let r=r0; r<=r1+1e-9 && n<400; r+=step, n++){
+      const rr=Math.round(r/step)*step; if(rr<0.5) continue;
+      const y=s.priceToCoordinate(usdFromRank(rr)); if(y==null) continue;
+      const yb=y*vpr; if(yb<0||yb>H) continue;
+      const isCL=Math.abs(rr-4)<1e-6, isInt=Math.abs(rr-Math.round(rr))<1e-6;
+      ctx.strokeStyle=isCL?"rgba(245,196,81,.85)":isInt?"rgba(130,140,155,.42)":"rgba(120,131,146,.16)";
+      ctx.lineWidth=Math.max(1,hpr); ctx.setLineDash(isCL||isInt?[]:[2*hpr,3*hpr]);
+      ctx.beginPath(); ctx.moveTo(0,yb); ctx.lineTo(W,yb); ctx.stroke();
+      if(isCL || Math.abs(yb-lastLabelY)>=15*vpr){
+        lastLabelY=yb; ctx.setLineDash([]);
+        const lab = isCL?"4 · CL":(dec===0?"P"+rr.toFixed(0):rr.toFixed(dec));
+        const tw=ctx.measureText(lab).width;
+        ctx.fillStyle="rgba(11,13,16,.72)"; ctx.fillRect(6*hpr, yb-7*vpr, tw+6*hpr, 14*vpr);
+        ctx.fillStyle=isCL?"rgba(245,196,81,.97)":"rgba(155,163,175,.92)";
+        ctx.fillText(lab, 9*hpr, yb+0.5*vpr);
+      }
+    }
+    ctx.restore();
+  });};
+  const view={ renderer(){return {draw};}, zOrder(){return "bottom";} };
+  return { attached(p){api=p;}, detached(){api=null;}, updateAllViews(){}, paneViews(){return [view];},
+    setStep(st){step=st; if(api&&api.requestUpdate)api.requestUpdate();},
+    refresh(){ if(api&&api.requestUpdate)api.requestUpdate(); } };
 }
 
 // ---- corridor (runway to kickoff) + dividers, drawn in bitmap space ----
@@ -316,6 +342,7 @@ function buildFoot(){
     `<b>How to read it.</b> The horizontal rungs are the rank→price ladder for ${D.team}: each line is where the index sits if the market expects that finishing place `
     + `(P4 = the Champions-League cut-off). The price line is the live OFFv1 oracle — it drifts as the market's implied rank moves, built from de-vigged consensus across `
     + `${D.consensus_now.books}+ sharp books + Polymarket/Kalshi. One long corridor runs to kickoff (${new Date(D.kickoff).toLocaleDateString("en-US",{month:"short",day:"numeric"})}); there are no game settlements until then. `
+    + `The view stays zoomed to the live price; the <b>R1 / R1.1 / R1.11</b> tabs set how finely the ladder is drawn (whole places · tenths · hundredths). `
     + `<b>Trade:</b> if you think they finish above the market's implied rank, you're long the rungs above; below, you're short. `
     + `<br><span style="color:#5c6571">Static snapshot · OFFv1 · kickoff date is a known real-world constant (not in the fixtures table yet).</span>`;
 }
@@ -331,12 +358,11 @@ function setType(t){ chartType=t;
   document.querySelectorAll("#ctype .tool").forEach(x=>x.classList.toggle("on", x.dataset.t===t));
 }
 document.querySelectorAll("#ctype .tool").forEach(b=>b.onclick=()=>setType(b.dataset.t));
-document.querySelectorAll("#view .tool").forEach(b=>b.onclick=()=>{
-  document.querySelectorAll("#view .tool").forEach(x=>x.classList.remove("on")); b.classList.add("on");
-  ladderMode = b.dataset.v==="ladder";
-  series.setData(CLEAN); // force autoscale to re-consult the provider
+document.querySelectorAll("#detail .tool").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("#detail .tool").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  rankStep=parseFloat(b.dataset.s); rungs.setStep(rankStep);
 });
-document.getElementById("t-rungs").onclick=function(){ showRungs=!showRungs; this.textContent="Rungs "+(showRungs?"✓":"✕"); this.classList.toggle("on",showRungs); drawRungs(); };
+document.getElementById("t-rungs").onclick=function(){ showRungs=!showRungs; this.textContent="Rungs "+(showRungs?"✓":"✕"); this.classList.toggle("on",showRungs); rungs.refresh(); };
 document.getElementById("t-fit").onclick=()=>chart.timeScale().fitContent();
 
 addEventListener("resize",()=>chart&&chart.applyOptions({}));
