@@ -44,11 +44,6 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font-family:
 .tool.on{color:#0b0d10;background:var(--grn);font-weight:600}
 .tool.on.cyk{background:var(--cyan)}
 .barlab{font-family:var(--mono);font-size:10px;letter-spacing:.5px;color:var(--dim);text-transform:uppercase;margin-right:2px}
-.chips{display:flex;gap:5px;flex-wrap:wrap}
-.rchip{font-family:var(--mono);font-size:11px;color:var(--mut);background:var(--panel);border:1px solid var(--bd);
-  border-radius:7px;padding:4px 9px;cursor:pointer;white-space:nowrap;transition:.12s}
-.rchip:hover{color:var(--tx);border-color:var(--bd2)}
-.rchip.on{color:#0b0d10;background:var(--cyan);border-color:var(--cyan);font-weight:600}
 
 /* ---------- chart ---------- */
 .wrap{position:relative;background:var(--panel);border:1px solid var(--bd);border-radius:13px;overflow:hidden}
@@ -116,15 +111,9 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font-family:
       <button class="tool" data-s="0.01" title="Hundredths (…4.10, 4.11, 4.12…)">R1.11</button>
     </div>
     <div class="group">
-      <button class="tool" id="t-rungs" title="Toggle rank rungs">Rungs ✓</button>
+      <button class="tool on" id="t-rungs" title="Show/hide all rank lines">Rank lines ✓</button>
       <button class="tool" id="t-fit" title="Reset zoom">Fit</button>
     </div>
-  </div>
-
-  <div class="bar" id="linesbar">
-    <span class="barlab" title="Pin a horizontal line at a rank's price; the scale expands to fit">Ref lines</span>
-    <div class="chips" id="rankchips"></div>
-    <button class="tool" id="clearlines" title="Remove all reference lines">Clear</button>
   </div>
 
   <div class="wrap">
@@ -144,7 +133,7 @@ const F = (n,d=2)=>n==null?"—":Number(n).toLocaleString("en-US",{minimumFracti
 const ord = n => { const r=Math.round(n); const s=["th","st","nd","rd"], v=r%100; return r+(s[(v-20)%10]||s[v]||s[0]); };
 const tsec = iso => Math.floor(new Date(iso).getTime()/1000);
 
-let D, A, K, CB, AR, PP, KICK_T, NOW_T, series, chart, rungs, refLines, showRungs=true, chartType="line", rankStep=0.1, CLEAN, DMIN, DMAX, RLO, RHI, refRanks=new Set();
+let D, A, K, CB, AR, PP, KICK_T, NOW_T, series, chart, rungs, showRungs=true, chartType="line", rankStep=0.1, CLEAN, DMIN, DMAX, RLO, RHI;
 
 // ---- ladder math (single source of truth) ----
 const usdFromRank = r => Math.exp(K*(CB+(AR-r)*PP));
@@ -182,7 +171,6 @@ async function boot(){
   else cc.innerHTML=`<span class="chip out">○ ${ord(fin)} · outside the CL places</span>`;
 
   buildChart();
-  buildLines();
   buildRail(fin);
   buildFoot();
 }
@@ -239,7 +227,6 @@ function buildChart(){
 
   series.attachPrimitive(makeCorridor());
   rungs=makeRungs(); series.attachPrimitive(rungs); rungs.setStep(rankStep);
-  refLines=makeRefLines(); series.attachPrimitive(refLines);
   chart.timeScale().fitContent();
 
   chart.subscribeCrosshairMove(onHover);
@@ -284,40 +271,10 @@ function makeRungs(){
     refresh(){ if(api&&api.requestUpdate)api.requestUpdate(); } };
 }
 
-// ---- price-scale band: tight to data, expanded to fit any pinned ref lines ----
+// ---- price-scale band: always tight to the data (rank-padded) ----
 function applyScale(){
   const padR=Math.max(0.30,((RHI-RLO)||0)*0.9);
-  let top=RLO-padR, bot=RHI+padR;
-  for(const r of refRanks){ top=Math.min(top,r-0.2); bot=Math.max(bot,r+0.2); }
-  DMAX=usdFromRank(top); DMIN=usdFromRank(bot);   // better rank -> higher price -> top
-}
-function rescale(){ applyScale(); if(CLEAN) series.setData(CLEAN); if(refLines) refLines.refresh(); }
-
-// ---- user-pinned rank reference lines (full-width, persistent) ----
-const RANK_TAG={1:"Title",4:"CL",6:"Europa",16:"Releg"};
-const RANK_COL={1:"rgba(245,196,81,.92)",4:"rgba(245,196,81,.92)",6:"rgba(96,165,250,.9)",16:"rgba(224,70,106,.9)"};
-function makeRefLines(){
-  let api=null;
-  const draw=target=>{ if(!api||!refRanks.size) return; target.useBitmapCoordinateSpace(scope=>{
-    const ctx=scope.context,hpr=scope.horizontalPixelRatio,vpr=scope.verticalPixelRatio;
-    const s=api.series,H=scope.bitmapSize.height,W=scope.bitmapSize.width;
-    ctx.save(); ctx.font=`${10.5*hpr}px ui-monospace,Menlo,monospace`; ctx.textBaseline="middle";
-    for(const r of refRanks){
-      const y=s.priceToCoordinate(usdFromRank(r)); if(y==null) continue; const yb=y*vpr;
-      if(yb<-2||yb>H+2) continue;
-      const col=RANK_COL[r]||"rgba(200,208,220,.75)";
-      ctx.strokeStyle=col; ctx.lineWidth=Math.max(1,1.4*hpr); ctx.setLineDash([]);
-      ctx.beginPath(); ctx.moveTo(0,yb); ctx.lineTo(W,yb); ctx.stroke();
-      const lab=(RANK_TAG[r]?`${r} · ${RANK_TAG[r]}`:`rank ${r}`)+`  $${usdFromRank(r).toFixed(2)}`;
-      ctx.textAlign="right"; const tw=ctx.measureText(lab).width;
-      ctx.fillStyle="rgba(11,13,16,.82)"; ctx.fillRect(W-tw-12*hpr, yb-8*vpr, tw+10*hpr, 16*vpr);
-      ctx.fillStyle=col; ctx.fillText(lab, W-6*hpr, yb+0.5*vpr);
-    }
-    ctx.restore();
-  });};
-  const view={renderer(){return{draw};},zOrder(){return "bottom";}};
-  return { attached(p){api=p;}, detached(){api=null;}, updateAllViews(){}, paneViews(){return[view];},
-    refresh(){ if(api&&api.requestUpdate)api.requestUpdate(); } };
+  DMAX=usdFromRank(RLO-padR); DMIN=usdFromRank(RHI+padR);   // better rank -> higher price -> top
 }
 
 // ---- corridor (runway to kickoff) + dividers, drawn in bitmap space ----
@@ -410,26 +367,8 @@ document.querySelectorAll("#detail .tool").forEach(b=>b.onclick=()=>{
   document.querySelectorAll("#detail .tool").forEach(x=>x.classList.remove("on")); b.classList.add("on");
   rankStep=parseFloat(b.dataset.s); rungs.setStep(rankStep);
 });
-document.getElementById("t-rungs").onclick=function(){ showRungs=!showRungs; this.textContent="Rungs "+(showRungs?"✓":"✕"); this.classList.toggle("on",showRungs); rungs.refresh(); };
+document.getElementById("t-rungs").onclick=function(){ showRungs=!showRungs; this.textContent="Rank lines "+(showRungs?"✓":"✕"); this.classList.toggle("on",showRungs); rungs.refresh(); };
 document.getElementById("t-fit").onclick=()=>chart.timeScale().fitContent();
-
-// ---- ref-line chips ----
-function buildLines(){
-  const RANKS=[1,2,3,4,5,6,7,8,16,17,18];
-  document.getElementById("rankchips").innerHTML = RANKS.map(r=>
-    `<button class="rchip" data-r="${r}">${r}${RANK_TAG[r]?"·"+RANK_TAG[r]:""}</button>`).join("");
-  document.querySelectorAll("#rankchips .rchip").forEach(b=>b.onclick=()=>{
-    const r=+b.dataset.r;
-    if(refRanks.has(r)){ refRanks.delete(r); b.classList.remove("on"); }
-    else { refRanks.add(r); b.classList.add("on"); }
-    rescale();
-  });
-  document.getElementById("clearlines").onclick=()=>{
-    refRanks.clear();
-    document.querySelectorAll("#rankchips .rchip").forEach(b=>b.classList.remove("on"));
-    rescale();
-  };
-}
 
 addEventListener("resize",()=>chart&&chart.applyOptions({}));
 </script>
