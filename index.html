@@ -133,7 +133,7 @@ const F = (n,d=2)=>n==null?"—":Number(n).toLocaleString("en-US",{minimumFracti
 const ord = n => { const r=Math.round(n); const s=["th","st","nd","rd"], v=r%100; return r+(s[(v-20)%10]||s[v]||s[0]); };
 const tsec = iso => Math.floor(new Date(iso).getTime()/1000);
 
-let D, A, K, CB, AR, PP, KICK_T, NOW_T, series, chart, rungs, showRungs=true, chartType="line", rankStep=0.1, CLEAN, DMIN, DMAX, RLO, RHI;
+let D, A, K, CB, AR, PP, KICK_T, NOW_T, series, chart, rungs, showRungs=true, chartType="line", rankStep=0.1, CLEAN, DMIN, DMAX, RLO, RHI, LEAGUE_N=18;
 
 // ---- ladder math (single source of truth) ----
 const usdFromRank = r => Math.exp(K*(CB+(AR-r)*PP));
@@ -144,6 +144,7 @@ async function boot(){
   D = await (await fetch("off-leipzig.json?_="+Date.now())).json();
   A=D.anchor; K=A.k_usd; CB=A.carry_b; AR=A.anchor_rank; PP=A.per_place_idx;
   KICK_T=tsec(D.kickoff);
+  LEAGUE_N=Math.max(18, Math.ceil(Math.max(...D.rivals.map(r=>r.rank))));  // # of ranks in the ladder
   const last=D.series[D.series.length-1], first=D.series[0];
   NOW_T=tsec(last.t);
 
@@ -227,7 +228,7 @@ function buildChart(){
 
   series.attachPrimitive(makeCorridor());
   rungs=makeRungs(); series.attachPrimitive(rungs); rungs.setStep(rankStep);
-  chart.timeScale().fitContent();
+  fitTime();
 
   chart.subscribeCrosshairMove(onHover);
 }
@@ -271,10 +272,19 @@ function makeRungs(){
     refresh(){ if(api&&api.requestUpdate)api.requestUpdate(); } };
 }
 
-// ---- price-scale band: always tight to the data (rank-padded) ----
+// ---- price-scale band ----
+// rank lines ON  -> fit the WHOLE ladder (rank 1 … league size) so every rung is drawn
+// rank lines OFF -> tight to the live price (drift), rank-padded
 function applyScale(){
   const padR=Math.max(0.30,((RHI-RLO)||0)*0.9);
-  DMAX=usdFromRank(RLO-padR); DMIN=usdFromRank(RHI+padR);   // better rank -> higher price -> top
+  const top = showRungs ? Math.min(0.6, RLO-padR) : RLO-padR;
+  const bot = showRungs ? Math.max(LEAGUE_N+0.4, RHI+padR) : RHI+padR;
+  DMAX=usdFromRank(top); DMIN=usdFromRank(bot);   // better rank -> higher price -> top
+}
+// fit the time axis, retried across a few frames to survive the autoSize width race
+function fitTime(){
+  const f=()=>{ try{ chart.timeScale().fitContent(); }catch(e){} };
+  f(); requestAnimationFrame(()=>{ f(); requestAnimationFrame(f); }); setTimeout(f,90);
 }
 
 // ---- corridor (runway to kickoff) + dividers, drawn in bitmap space ----
@@ -367,8 +377,8 @@ document.querySelectorAll("#detail .tool").forEach(b=>b.onclick=()=>{
   document.querySelectorAll("#detail .tool").forEach(x=>x.classList.remove("on")); b.classList.add("on");
   rankStep=parseFloat(b.dataset.s); rungs.setStep(rankStep);
 });
-document.getElementById("t-rungs").onclick=function(){ showRungs=!showRungs; this.textContent="Rank lines "+(showRungs?"✓":"✕"); this.classList.toggle("on",showRungs); rungs.refresh(); };
-document.getElementById("t-fit").onclick=()=>chart.timeScale().fitContent();
+document.getElementById("t-rungs").onclick=function(){ showRungs=!showRungs; this.textContent="Rank lines "+(showRungs?"✓":"✕"); this.classList.toggle("on",showRungs); applyScale(); series.setData(CLEAN); rungs.refresh(); };
+document.getElementById("t-fit").onclick=()=>fitTime();
 
 addEventListener("resize",()=>chart&&chart.applyOptions({}));
 </script>
